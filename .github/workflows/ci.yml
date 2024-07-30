@@ -1,0 +1,374 @@
+name: Continuous Integration
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+jobs:
+  generate-ref:
+    name: Generate Ref
+    runs-on: ubuntu-latest
+    outputs:
+      REF: ${{ steps.generate-ref.outputs.ref }}
+    steps:
+      - run: helm version
+      - uses: actions/checkout@v1
+      - run: helm version
+      - id: generate-ref
+        name: Generate Ref
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ] ; then
+            ref=$(php -r "echo str_replace('/', '-SLASH-', '${{ github.event.pull_request.head.ref }}');")
+            echo "$ref"
+            printf "::set-output name=ref::%s" $ref
+            exit 0
+          fi
+          echo "${GITHUB_REF##*/}"
+          echo "::set-output name=ref::${GITHUB_REF##*/}"
+  runner-matrix:
+    name: Runner Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.runner-matrix.outputs.runner }}
+    steps:
+      - id: runner-matrix
+        name: Runner Matrix
+        run: |
+          echo "::set-output name=runner::[\"ubuntu-latest\"]"
+  tests-helm-works:
+    name: "Testing Helm Command: ${{ matrix.exec }} on ${{ matrix.runner }}"
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - runner-matrix
+    strategy:
+      matrix:
+        runner: ${{ fromJson(needs.runner-matrix.outputs.runner) }}
+        exec:
+          - "helm version"
+          - "helm repo add WyriHaximusNet https://helm.wyrihaximus.net/"
+          - "helm repo add WyriHaximusNet https://helm.wyrihaximus.net/ && helm repo list"
+          - "helm plugin install https://github.com/hypnoglow/helm-s3.git"
+          - "helm plugin install https://github.com/hypnoglow/helm-s3.git && helm plugin list"
+          - "helm env"
+    steps:
+      - uses: actions/checkout@v1
+      - uses: ./
+        with:
+          exec: ${{ matrix.exec }}
+          kubeconfig: tada
+  tests-helm-output:
+    name: "Testing Helm Output ${{ matrix.runner }}"
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - runner-matrix
+    strategy:
+      matrix:
+        runner: ${{ fromJson(needs.runner-matrix.outputs.runner) }}
+    steps:
+      - uses: actions/checkout@v1
+      - run: helm version
+      - uses: ./
+        id: helm3
+        with:
+          exec: helm repo add WyriHaximusNet https://helm.wyrihaximus.net/ && helm repo list
+          kubeconfig: tada
+      - run: |
+          php -r "exit(strpos('${HELM_OUTPUT}', 'WyriHaximusNet') !== false ? 0 : 255);"
+        env:
+          HELM_OUTPUT: ${{ steps.helm3.outputs.helm_output }}
+      - run: |
+          php -r "exit(strpos('${HELM_OUTPUT}', 'has been added to your repositories') !== false ? 0 : 255);"
+        env:
+          HELM_OUTPUT: ${{ steps.helm3.outputs.helm_output }}
+      - run: |
+          php -r "exit(strpos('${HELM_OUTPUT}', 'https://helm.wyrihaximus.net/') !== false ? 0 : 255);"
+        env:
+          HELM_OUTPUT: ${{ steps.helm3.outputs.helm_output }}
+  tests-helm-install-input:
+    name: "Testing Helm Install (input) ${{ matrix.runner }}"
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - runner-matrix
+    strategy:
+      matrix:
+        runner: ${{ fromJson(needs.runner-matrix.outputs.runner) }}
+    steps:
+      - uses: actions/checkout@v1
+      - name: Create k8s Kind Cluster
+        uses: helm/kind-action@v1.2.0
+      - name: Get running image ID
+        id: ps
+        run: printf "::set-output name=id::%s" $(docker ps --format "{{.ID}}")
+        env:
+          IMAGE: ${{ steps.build.outputs.tag }}
+      - name: Get running image IP
+        id: inspect
+        run: printf "::set-output name=ip::%s" $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${IMAGE_ID})
+        env:
+          IMAGE_ID: ${{ steps.ps.outputs.id }}
+      - run: sed -i "s/127.0.0.1:32768/${KIND_IP}:6443/g" ~/.kube/config
+        env:
+          KIND_IP: ${{ steps.inspect.outputs.ip }}
+      - name: Make kubeconfig available to Helm3 action
+        run: |
+          kubeconfig=$(cat ~/.kube/config)
+          kubeconfig="${kubeconfig//'%'/'%25'}"
+          kubeconfig="${kubeconfig//$'\n'/'%0A'}"
+          kubeconfig="${kubeconfig//$'\r'/'%0D'}"
+          echo "::set-output name=kubeconfig::$kubeconfig"
+        id: kubeconfig
+      - name: List installed packages
+        uses: ./
+        id: helmlistcountfirst
+        with:
+          exec: |
+            printf "count=%s\n" $(helm list | grep ducker-hub-exporter | wc -l) >> $GITHUB_OUTPUT
+          kubeconfig: ${{ steps.kubeconfig.outputs.kubeconfig }}
+      - run: |
+          php -r "exit(trim('${COUNT}') === '0' ? 0 : 255);"
+        env:
+          COUNT: ${{ steps.helmlistcountfirst.outputs.count }}
+      - name: Install ducker-hub-exporter
+        uses: ./
+        id: helm3
+        with:
+          exec: |
+            helm repo add WyriHaximusNet https://helm.wyrihaximus.net/
+            helm install ducker-hub-exporter WyriHaximusNet/docker-hub-exporter --atomic
+          kubeconfig: ${{ steps.kubeconfig.outputs.kubeconfig }}
+      - name: List installed packages
+        uses: ./
+        with:
+          exec: |
+            helm list
+          kubeconfig: ${{ steps.kubeconfig.outputs.kubeconfig }}
+      - name: List installed packages
+        uses: ./
+        id: helmlistcountseccond
+        with:
+          exec: |
+            helm list
+            printf "::set-output name=count::%s" $(helm list | grep ducker-hub-exporter | wc -l)
+          kubeconfig: ${{ steps.kubeconfig.outputs.kubeconfig }}
+      - run: |
+          php -r "exit(trim('${COUNT}') === '1' ? 0 : 255);"
+        env:
+          COUNT: ${{ steps.helmlistcountseccond.outputs.count }}
+      - name: UnInstall ducker-hub-exporter
+        uses: ./
+        with:
+          exec: |
+            helm uninstall ducker-hub-exporter
+          kubeconfig: ${{ steps.kubeconfig.outputs.kubeconfig }}
+      - name: List installed packages
+        uses: ./
+        id: helmlistcountthird
+        with:
+          exec: |
+            helm list
+            printf "::set-output name=count::%s" $(helm list | grep ducker-hub-exporter | wc -l)
+          kubeconfig: ${{ steps.kubeconfig.outputs.kubeconfig }}
+      - run: |
+          php -r "exit(trim('${COUNT}') === '0' ? 0 : 255);"
+        env:
+          COUNT: ${{ steps.helmlistcountthird.outputs.count }}
+  tests-helm-install-input-overruled:
+    name: "Testing Helm Install (input overruled) ${{ matrix.runner }}"
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - runner-matrix
+    strategy:
+      matrix:
+        runner: ${{ fromJson(needs.runner-matrix.outputs.runner) }}
+    steps:
+      - uses: actions/checkout@v1
+      - name: Create k8s Kind Cluster
+        uses: helm/kind-action@v1.2.0
+      - name: Get running image ID
+        id: ps
+        run: printf "::set-output name=id::%s" $(docker ps --format "{{.ID}}")
+        env:
+          IMAGE: ${{ steps.build.outputs.tag }}
+      - name: Get running image IP
+        id: inspect
+        run: printf "::set-output name=ip::%s" $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${IMAGE_ID})
+        env:
+          IMAGE_ID: ${{ steps.ps.outputs.id }}
+      - run: sed -i "s/127.0.0.1:32768/${KIND_IP}:6443/g" ~/.kube/config
+        env:
+          KIND_IP: ${{ steps.inspect.outputs.ip }}
+      - name: Make kubeconfig available to Helm3 action
+        run: |
+          kubeconfig=$(cat ~/.kube/config)
+          kubeconfig="${kubeconfig//'%'/'%25'}"
+          kubeconfig="${kubeconfig//$'\n'/'%0A'}"
+          kubeconfig="${kubeconfig//$'\r'/'%0D'}"
+          echo "::set-output name=kubeconfig::$kubeconfig"
+        id: kubeconfig
+      - name: List installed packages
+        uses: ./
+        id: helmlistcountfirst
+        with:
+          exec: |
+            printf "count=%s\n" $(helm list | grep ducker-hub-exporter | wc -l) >> $GITHUB_OUTPUT
+          kubeconfig: ${{ steps.kubeconfig.outputs.kubeconfig }}
+      - run: |
+          php -r "exit(trim('${COUNT}') === '0' ? 0 : 255);"
+        env:
+          COUNT: ${{ steps.helmlistcountfirst.outputs.count }}
+      - name: Install ducker-hub-exporter
+        uses: ./
+        id: helm3
+        with:
+          exec: |
+            helm repo add WyriHaximusNet https://helm.wyrihaximus.net/
+            helm install ducker-hub-exporter WyriHaximusNet/docker-hub-exporter --atomic
+          kubeconfig: ${{ steps.kubeconfig.outputs.kubeconfig }}
+      - name: List installed packages
+        uses: ./
+        with:
+          exec: |
+            helm list
+          kubeconfig: ${{ steps.kubeconfig.outputs.kubeconfig }}
+      - run: |
+          rm ~/.kube -Rf
+          mkdir ~/.kube
+          echo "junk" > ~/.kube/config
+      - name: Get kubeconfig contents
+        uses: ./
+        id: getkubeconfigcontents
+        with:
+          exec: |
+            helm list
+            printf "::set-output name=cnt::%s" $(cat ~/.kube/config)
+          kubeconfig: ${{ steps.kubeconfig.outputs.kubeconfig }}
+      - name: "Assert kubeconfig really contains: junk"
+        uses: nick-fields/assert-action@v1
+        with:
+          expected: junk
+          actual: ${{ steps.getkubeconfigcontents.outputs.cnt }}
+      - name: List installed packages through a overruled kubeconfig
+        uses: ./
+        id: helmlistcountoverruledkubeconfig
+        with:
+          exec: |
+            helm list
+            printf "::set-output name=count::%s" $(helm list | grep ducker-hub-exporter | wc -l)
+          kubeconfig: ${{ steps.kubeconfig.outputs.kubeconfig }}
+          overrule_existing_kubeconfig: "true"
+      - run: |
+          php -r "exit(trim('${COUNT}') === '1' ? 0 : 255);"
+        env:
+          COUNT: ${{ steps.helmlistcountoverruledkubeconfig.outputs.count }}
+      - run: |
+          rm ~/.kube -Rf
+      - name: UnInstall ducker-hub-exporter
+        uses: ./
+        with:
+          exec: |
+            helm uninstall ducker-hub-exporter
+          kubeconfig: ${{ steps.kubeconfig.outputs.kubeconfig }}
+      - name: List installed packages
+        uses: ./
+        id: helmlistcountthird
+        with:
+          exec: |
+            helm list
+            printf "::set-output name=count::%s" $(helm list | grep ducker-hub-exporter | wc -l)
+          kubeconfig: ${{ steps.kubeconfig.outputs.kubeconfig }}
+      - run: |
+          php -r "exit(trim('${COUNT}') === '0' ? 0 : 255);"
+        env:
+          COUNT: ${{ steps.helmlistcountthird.outputs.count }}
+  tests-helm-install-file:
+    name: "Testing Helm Install (file) ${{ matrix.runner }}"
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - runner-matrix
+    strategy:
+      matrix:
+        runner: ${{ fromJson(needs.runner-matrix.outputs.runner) }}
+    steps:
+      - uses: actions/checkout@v1
+      - name: Create k8s Kind Cluster
+        uses: helm/kind-action@v1.2.0
+      - name: Get running image ID
+        id: ps
+        run: printf "::set-output name=id::%s" $(docker ps --format "{{.ID}}")
+        env:
+          IMAGE: ${{ steps.build.outputs.tag }}
+      - name: Get running image IP
+        id: inspect
+        run: printf "::set-output name=ip::%s" $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${IMAGE_ID})
+        env:
+          IMAGE_ID: ${{ steps.ps.outputs.id }}
+      - run: sed -i "s/127.0.0.1:32768/${KIND_IP}:6443/g" ~/.kube/config
+        env:
+          KIND_IP: ${{ steps.inspect.outputs.ip }}
+      - name: List installed packages
+        uses: ./
+        id: helmlistcountfirst
+        with:
+          exec: |
+            helm list | grep ducker-hub-exporter | wc -l
+      - run: |
+          php -r "exit(trim('${COUNT}') === '0' ? 0 : 255);"
+        env:
+          COUNT: ${{ steps.helmlistcountfirst.outputs.helm_output }}
+      - name: Install ducker-hub-exporter
+        uses: ./
+        id: helm3
+        with:
+          exec: |
+            helm repo add WyriHaximusNet https://helm.wyrihaximus.net/
+            helm install ducker-hub-exporter WyriHaximusNet/docker-hub-exporter --atomic
+      - name: List installed packages
+        uses: ./
+        with:
+          exec: |
+            helm list
+      - name: List installed packages
+        uses: ./
+        id: helmlistcountseccond
+        with:
+          exec: |
+            helm list | grep ducker-hub-exporter | wc -l
+      - run: |
+          php -r "exit(trim('${COUNT}') === '1' ? 0 : 255);"
+        env:
+          COUNT: ${{ steps.helmlistcountseccond.outputs.helm_output }}
+      - name: UnInstall ducker-hub-exporter
+        uses: ./
+        with:
+          exec: |
+            helm uninstall ducker-hub-exporter
+      - name: List installed packages
+        uses: ./
+        id: helmlistcountthird
+        with:
+          exec: |
+            helm list | grep ducker-hub-exporter | wc -l
+      - run: |
+          php -r "exit(trim('${COUNT}') === '0' ? 0 : 255);"
+        env:
+          COUNT: ${{ steps.helmlistcountthird.outputs.helm_output }}
+## Keeping this in for future use, but GitHub Actions doesn't turn this job green so it's considered fail, which it isn't 🤣
+#  ensure-failure-on-non-0-exit-code:
+#    name: "Ensure failure on non 0 exit code ${{ matrix.runner }}"
+#    runs-on: ${{ matrix.runner }}
+#    continue-on-error: true
+#    needs:
+#      - runner-matrix
+#    strategy:
+#      matrix:
+#        runner: ${{ fromJson(needs.runner-matrix.outputs.runner) }}
+#    steps:
+#      - uses: actions/checkout@v1
+#      - name: List installed packages
+#        uses: ./
+#        with:
+#          exec: |
+#            exit 1
+#      - run: |
+#          exit 0
+#        if: ${{ failure() }}
