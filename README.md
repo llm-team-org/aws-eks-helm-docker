@@ -1,6 +1,6 @@
 # Helm Github Action
 
-Runs given Helm/shell commands after ensuring Helm and kubectl are installed or pull in it's own. 
+Runs given Helm/shell commands after ensuring Helm and kubectl are installed or pull in it's own.
 
 ![Example output showing this action in action](images/output.png)
 
@@ -53,7 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Deploy
-        uses: WyriHaximus/github-action-helm3@v3
+        uses: llm-team-org/aws-eks-helm-docker@helm-test
         with:
           exec: helm upgrade APP_NAME ./.helm/app/ --install --wait --atomic --namespace=APP_NAMESPACE --values=./.helm/app/values.yaml
           kubeconfig: '${{ secrets.KUBECONFIG }}'
@@ -72,14 +72,14 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Lint Helm
-        uses: WyriHaximus/github-action-helm3@v3
+        uses: llm-team-org/aws-eks-helm-docker@helm-test
         with:
           exec: helm lint ./.helm/app/
 ```
 
-## License ##
+## License
 
-Copyright 2023 [Cees-Jan Kiewiet](http://wyrihaximus.net/)
+Copyright 2024 ali akbar
 
 Permission is hereby granted, free of charge, to any person
 obtaining a copy of this software and associated documentation
