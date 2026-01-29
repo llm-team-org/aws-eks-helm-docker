@@ -13,7 +13,10 @@ const { waitFile } = require('wait-file');
 
 // Constants
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
-const KUBECTL_DOWNLOAD_URL = 'https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/$(dpkg --print-architecture)/kubectl';
+const S3_BUCKET = 'doazgpt-public';
+const S3_BASE_URL = `https://${S3_BUCKET}.s3.amazonaws.com`;
+// Fallback URLs (used if S3 download fails)
+const KUBECTL_DOWNLOAD_URL_FALLBACK = 'https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/$(dpkg --print-architecture)/kubectl';
 const HELM_INSTALLER_URL = 'https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3';
 const ANSI_COLORS = {
     CYAN: '\x1b[36m',
@@ -136,44 +139,74 @@ helm() {
     "${helmPath}" "$@"
 }
 
-# Download and install kubectl
-echo "📥 Downloading kubectl..."
-if ! curl -f -s -L -o "${kubectlPath}" "${KUBECTL_DOWNLOAD_URL}"; then
-    echo "❌ Failed to download kubectl"
-    exit 1
-fi
-chmod +x "${kubectlPath}"
-echo "✅ kubectl downloaded successfully"
+# Download and install kubectl from S3 (with fallback)
+echo "📥 Downloading kubectl from S3..."
+ARCH=$(dpkg --print-architecture || uname -m)
+KUBECTL_S3_URL="${S3_BASE_URL}/tools/kubectl/\${ARCH}/kubectl-latest"
 
-# Download and install helm
-echo "📥 Downloading Helm..."
-ARCH=$(dpkg --print-architecture)
-# Map architecture names (dpkg uses amd64/arm64, helm uses amd64/arm64)
-case "$ARCH" in
-    amd64) HELM_ARCH="amd64" ;;
-    arm64) HELM_ARCH="arm64" ;;
+if curl -f -s -L -o "${kubectlPath}" "\${KUBECTL_S3_URL}"; then
+    chmod +x "${kubectlPath}"
+    echo "✅ kubectl downloaded from S3"
+else
+    echo "⚠️  S3 download failed, trying fallback..."
+    KUBECTL_FALLBACK_URL="${KUBECTL_DOWNLOAD_URL_FALLBACK}"
+    if ! curl -f -s -L -o "${kubectlPath}" "\${KUBECTL_FALLBACK_URL}"; then
+        echo "❌ Failed to download kubectl from both S3 and fallback"
+        exit 1
+    fi
+    chmod +x "${kubectlPath}"
+    echo "✅ kubectl downloaded from fallback source"
+fi
+
+# Download and install helm from S3 (with fallback)
+echo "📥 Downloading Helm from S3..."
+# Map architecture names
+case "\${ARCH}" in
+    amd64|x86_64) HELM_ARCH="amd64" ;;
+    arm64|aarch64) HELM_ARCH="arm64" ;;
     *) HELM_ARCH="amd64" ;;
 esac
 
 HELM_VERSION=$(curl -s https://api.github.com/repos/helm/helm/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\\1/' | head -1)
-if [ -z "$HELM_VERSION" ]; then
+if [ -z "\$HELM_VERSION" ]; then
     HELM_VERSION="v3.20.0"
 fi
-HELM_URL="https://get.helm.sh/helm-\${HELM_VERSION}-linux-\${HELM_ARCH}.tar.gz"
 
-if ! curl -f -s -L -o helm.tar.gz "\${HELM_URL}"; then
-    echo "❌ Failed to download Helm from \${HELM_URL}"
-    exit 1
+HELM_S3_URL="${S3_BASE_URL}/tools/helm/\${HELM_ARCH}/helm-latest"
+HELM_DOWNLOADED=false
+
+# Try S3 first
+if curl -f -s -L -o "${helmPath}" "\${HELM_S3_URL}"; then
+    chmod +x "${helmPath}"
+    # Verify it's a valid binary
+    if "${helmPath}" version --client --short >/dev/null 2>&1; then
+        HELM_DOWNLOADED=true
+        echo "✅ Helm downloaded from S3 (version \${HELM_VERSION})"
+    else
+        echo "⚠️  Downloaded file from S3 is not valid, trying fallback..."
+        rm -f "${helmPath}"
+    fi
 fi
 
-if ! tar -xzf helm.tar.gz -C "${toolsDir}" --strip-components=1 "linux-\${HELM_ARCH}/helm" 2>/dev/null; then
-    echo "❌ Failed to extract Helm binary"
+# Fallback to original source if S3 failed
+if [ "\${HELM_DOWNLOADED}" = "false" ]; then
+    echo "⚠️  S3 download failed, trying fallback..."
+    HELM_URL="https://get.helm.sh/helm-\${HELM_VERSION}-linux-\${HELM_ARCH}.tar.gz"
+    
+    if ! curl -f -s -L -o helm.tar.gz "\${HELM_URL}"; then
+        echo "❌ Failed to download Helm from both S3 and fallback"
+        exit 1
+    fi
+    
+    if ! tar -xzf helm.tar.gz -C "${toolsDir}" --strip-components=1 "linux-\${HELM_ARCH}/helm" 2>/dev/null; then
+        echo "❌ Failed to extract Helm binary"
+        rm -f helm.tar.gz
+        exit 1
+    fi
     rm -f helm.tar.gz
-    exit 1
+    chmod +x "${helmPath}"
+    echo "✅ Helm downloaded from fallback source (version \${HELM_VERSION})"
 fi
-rm -f helm.tar.gz
-chmod +x "${helmPath}"
-echo "✅ Helm downloaded successfully (version \${HELM_VERSION})"
 
 # Execute the helm command
 echo "🚀 Executing Helm command..."

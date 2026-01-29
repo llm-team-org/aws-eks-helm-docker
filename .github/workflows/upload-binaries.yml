@@ -1,0 +1,129 @@
+name: Upload Binaries to S3
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run daily at 2 AM UTC to check for new versions
+    - cron: '0 2 * * *'
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  upload-binaries:
+    name: Upload kubectl and Helm to S3
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      
+      - name: Setup kubectl
+        id: kubectl
+        run: |
+          ARCH=${{ matrix.arch }}
+          KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+          KUBECTL_URL="https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
+          
+          curl -f -s -L -o kubectl "${KUBECTL_URL}"
+          chmod +x kubectl
+          
+          VERSION=$("./kubectl" version --client --short 2>/dev/null | cut -d' ' -f3 || echo "${KUBECTL_VERSION}")
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "✅ kubectl ${VERSION} downloaded"
+      
+      - name: Upload kubectl to S3
+        run: |
+          ARCH=${{ matrix.arch }}
+          VERSION="${{ steps.kubectl.outputs.version }}"
+          S3_BUCKET="doazgpt-public"
+          
+          # Upload version-specific
+          aws s3 cp kubectl "s3://${S3_BUCKET}/tools/kubectl/${ARCH}/kubectl-${VERSION}" \
+            --acl public-read \
+            --content-type application/octet-stream
+          
+          # Upload latest
+          aws s3 cp kubectl "s3://${S3_BUCKET}/tools/kubectl/${ARCH}/kubectl-latest" \
+            --acl public-read \
+            --content-type application/octet-stream
+          
+          # Upload version file
+          echo "${VERSION}" | aws s3 cp - "s3://${S3_BUCKET}/tools/kubectl/${ARCH}/version.txt" \
+            --acl public-read \
+            --content-type text/plain
+          
+          echo "✅ kubectl uploaded: https://${S3_BUCKET}.s3.amazonaws.com/tools/kubectl/${ARCH}/kubectl-latest"
+      
+      - name: Setup Helm
+        id: helm
+        run: |
+          ARCH=${{ matrix.arch }}
+          case "${ARCH}" in
+            amd64) HELM_ARCH="amd64" ;;
+            arm64) HELM_ARCH="arm64" ;;
+            *) HELM_ARCH="amd64" ;;
+          esac
+          
+          HELM_VERSION=$(curl -s https://api.github.com/repos/helm/helm/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)
+          if [ -z "$HELM_VERSION" ]; then
+            HELM_VERSION="v3.20.0"
+          fi
+          
+          HELM_URL="https://get.helm.sh/helm-${HELM_VERSION}-linux-${HELM_ARCH}.tar.gz"
+          
+          curl -f -s -L -o helm.tar.gz "${HELM_URL}"
+          tar -xzf helm.tar.gz "linux-${HELM_ARCH}/helm"
+          mv "linux-${HELM_ARCH}/helm" helm
+          chmod +x helm
+          rm -rf helm.tar.gz "linux-${HELM_ARCH}"
+          
+          echo "version=${HELM_VERSION}" >> $GITHUB_OUTPUT
+          echo "arch=${HELM_ARCH}" >> $GITHUB_OUTPUT
+          echo "✅ Helm ${HELM_VERSION} downloaded"
+      
+      - name: Upload Helm to S3
+        run: |
+          ARCH="${{ steps.helm.outputs.arch }}"
+          VERSION="${{ steps.helm.outputs.version }}"
+          S3_BUCKET="doazgpt-public"
+          
+          # Upload version-specific
+          aws s3 cp helm "s3://${S3_BUCKET}/tools/helm/${ARCH}/helm-${VERSION}" \
+            --acl public-read \
+            --content-type application/octet-stream
+          
+          # Upload latest
+          aws s3 cp helm "s3://${S3_BUCKET}/tools/helm/${ARCH}/helm-latest" \
+            --acl public-read \
+            --content-type application/octet-stream
+          
+          # Upload version file
+          echo "${VERSION}" | aws s3 cp - "s3://${S3_BUCKET}/tools/helm/${ARCH}/version.txt" \
+            --acl public-read \
+            --content-type text/plain
+          
+          echo "✅ Helm uploaded: https://${S3_BUCKET}.s3.amazonaws.com/tools/helm/${ARCH}/helm-latest"
+      
+      - name: Summary
+        run: |
+          echo "## ✅ Binaries Uploaded Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Architecture:** ${{ matrix.arch }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### kubectl" >> $GITHUB_STEP_SUMMARY
+          echo "- Version: ${{ steps.kubectl.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- URL: https://doazgpt-public.s3.amazonaws.com/tools/kubectl/${{ matrix.arch }}/kubectl-latest" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Helm" >> $GITHUB_STEP_SUMMARY
+          echo "- Version: ${{ steps.helm.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- URL: https://doazgpt-public.s3.amazonaws.com/tools/helm/${{ steps.helm.outputs.arch }}/helm-latest" >> $GITHUB_STEP_SUMMARY
