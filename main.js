@@ -143,12 +143,30 @@ helm() {
 echo "📥 Downloading kubectl from S3..."
 ARCH=$(dpkg --print-architecture || uname -m)
 KUBECTL_S3_URL="${S3_BASE_URL}/tools/kubectl/\${ARCH}/kubectl-latest"
+KUBECTL_DOWNLOADED=false
 
 if curl -f -s -L -o "${kubectlPath}" "\${KUBECTL_S3_URL}"; then
-    chmod +x "${kubectlPath}"
-    echo "✅ kubectl downloaded from S3"
+    # Check if file was downloaded and has content
+    if [ -s "${kubectlPath}" ]; then
+        chmod +x "${kubectlPath}"
+        # Verify it's a valid binary
+        if "${kubectlPath}" version --client >/dev/null 2>&1; then
+            KUBECTL_DOWNLOADED=true
+            echo "✅ kubectl downloaded from S3"
+        else
+            echo "⚠️  kubectl binary from S3 failed validation, trying fallback..."
+            rm -f "${kubectlPath}"
+        fi
+    else
+        echo "⚠️  Downloaded kubectl from S3 is empty, trying fallback..."
+        rm -f "${kubectlPath}"
+    fi
 else
-    echo "⚠️  S3 download failed, trying fallback..."
+    echo "⚠️  Failed to download kubectl from S3, trying fallback..."
+fi
+
+# Fallback to original source if S3 failed
+if [ "\${KUBECTL_DOWNLOADED}" = "false" ]; then
     KUBECTL_FALLBACK_URL="${KUBECTL_DOWNLOAD_URL_FALLBACK}"
     if ! curl -f -s -L -o "${kubectlPath}" "\${KUBECTL_FALLBACK_URL}"; then
         echo "❌ Failed to download kubectl from both S3 and fallback"
@@ -177,15 +195,34 @@ HELM_DOWNLOADED=false
 
 # Try S3 first
 if curl -f -s -L -o "${helmPath}" "\${HELM_S3_URL}"; then
-    chmod +x "${helmPath}"
-    # Verify it's a valid binary
-    if "${helmPath}" version --client --short >/dev/null 2>&1; then
-        HELM_DOWNLOADED=true
-        echo "✅ Helm downloaded from S3 (version \${HELM_VERSION})"
-    else
-        echo "⚠️  Downloaded file from S3 is not valid, trying fallback..."
+    # Check if file was downloaded and has reasonable size (should be > 1MB)
+    FILE_SIZE=$(stat -f%z "${helmPath}" 2>/dev/null || stat -c%s "${helmPath}" 2>/dev/null || echo "0")
+    if [ ! -s "${helmPath}" ] || [ "${FILE_SIZE}" -lt 1000000 ]; then
+        echo "⚠️  Downloaded file from S3 is empty or too small (\${FILE_SIZE} bytes), trying fallback..."
         rm -f "${helmPath}"
+    else
+        chmod +x "${helmPath}"
+        # Verify it's a valid binary by trying to run it
+        # First check if it's executable
+        if [ ! -x "${helmPath}" ]; then
+            echo "⚠️  Downloaded file from S3 is not executable, trying fallback..."
+            rm -f "${helmPath}"
+        else
+            # Try to run helm version command (with timeout to avoid hanging)
+            if timeout 5 "${helmPath}" version --client >/dev/null 2>&1 || "${helmPath}" version --client >/dev/null 2>&1; then
+                HELM_DOWNLOADED=true
+                HELM_ACTUAL_VERSION=$("${helmPath}" version --client --short 2>/dev/null | head -1 || echo "\${HELM_VERSION}")
+                echo "✅ Helm downloaded from S3 (\${HELM_ACTUAL_VERSION})"
+            else
+                # Get error details for debugging
+                ERROR_OUTPUT=$("${helmPath}" version --client 2>&1 || echo "unknown error")
+                echo "⚠️  Helm binary from S3 failed validation (size: \${FILE_SIZE} bytes, error: \${ERROR_OUTPUT}), trying fallback..."
+                rm -f "${helmPath}"
+            fi
+        fi
     fi
+else
+    echo "⚠️  Failed to download from S3 (HTTP error), trying fallback..."
 fi
 
 # Fallback to original source if S3 failed
