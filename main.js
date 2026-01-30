@@ -208,14 +208,20 @@ if curl -f -s -L -o "${helmPath}" "\${HELM_S3_URL}"; then
             echo "⚠️  Downloaded file from S3 is not executable, trying fallback..."
             rm -f "${helmPath}"
         else
-            # Try to run helm version command (with timeout to avoid hanging)
-            if timeout 5 "${helmPath}" version --client >/dev/null 2>&1 || "${helmPath}" version --client >/dev/null 2>&1; then
+            # Try to run helm version command (Helm v4 removed --client flag)
+            # Try without --client first (Helm v4+), then with --client (Helm v3)
+            if "${helmPath}" version >/dev/null 2>&1; then
+                HELM_DOWNLOADED=true
+                HELM_ACTUAL_VERSION=$("${helmPath}" version --short 2>/dev/null | head -1 || "${helmPath}" version 2>/dev/null | head -1 || echo "\${HELM_VERSION}")
+                echo "✅ Helm downloaded from S3 (\${HELM_ACTUAL_VERSION})"
+            elif "${helmPath}" version --client >/dev/null 2>&1; then
+                # Fallback for Helm v3
                 HELM_DOWNLOADED=true
                 HELM_ACTUAL_VERSION=$("${helmPath}" version --client --short 2>/dev/null | head -1 || echo "\${HELM_VERSION}")
                 echo "✅ Helm downloaded from S3 (\${HELM_ACTUAL_VERSION})"
             else
                 # Get error details for debugging
-                ERROR_OUTPUT=$("${helmPath}" version --client 2>&1 || echo "unknown error")
+                ERROR_OUTPUT=$("${helmPath}" version 2>&1 || "${helmPath}" version --client 2>&1 || echo "unknown error")
                 echo "⚠️  Helm binary from S3 failed validation (size: \${FILE_SIZE} bytes, error: \${ERROR_OUTPUT}), trying fallback..."
                 rm -f "${helmPath}"
             fi
