@@ -197,7 +197,7 @@ HELM_DOWNLOADED=false
 if curl -f -s -L -o "${helmPath}" "\${HELM_S3_URL}"; then
     # Check if file was downloaded and has reasonable size (should be > 1MB)
     FILE_SIZE=$(stat -f%z "${helmPath}" 2>/dev/null || stat -c%s "${helmPath}" 2>/dev/null || echo "0")
-    if [ ! -s "${helmPath}" ] || [ "${FILE_SIZE}" -lt 1000000 ]; then
+    if [ ! -s "${helmPath}" ] || [ "\${FILE_SIZE}" -lt 1000000 ]; then
         echo "⚠️  Downloaded file from S3 is empty or too small (\${FILE_SIZE} bytes), trying fallback..."
         rm -f "${helmPath}"
     else
